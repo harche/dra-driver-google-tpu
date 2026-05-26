@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	resourceapi "k8s.io/api/resource/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
@@ -52,12 +51,11 @@ func NewDriver(ctx context.Context,
 		klog.Errorf("error applying network settings: %v", err)
 	}
 
-	// Fetch node labels from Kubernetes API.
-	node, err := config.coreclient.CoreV1().Nodes().Get(ctx, config.flags.nodeName, metav1.GetOptions{})
+	// Fetch node labels.
+	nodeLabels, err := getTPUNodeLabels(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching node %q: %w", config.flags.nodeName, err)
+		return nil, fmt.Errorf("failed to get TPU node labels: %w", err)
 	}
-	nodeLabels := node.Labels
 
 	model := nodeLabels[AcceleratorLabel]
 	if model == "" {

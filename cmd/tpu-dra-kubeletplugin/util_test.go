@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -271,5 +275,82 @@ func TestCalculateHostBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetNodeLabelsFromMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/computeMetadata/v1/instance/attributes/kube-labels" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Metadata-Flavor") != "Google" {
+			t.Errorf("missing Metadata-Flavor header")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("cloud.google.com/gke-tpu-accelerator=tpu-v5-lite-device,cloud.google.com/gke-accelerator-count=4,cloud.google.com/gke-tpu-topology=2x2"))
+	}))
+	defer server.Close()
+
+	t.Setenv("GCE_METADATA_HOST", server.Listener.Addr().String())
+
+	got, err := getNodeLabelsFromMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := map[string]string{
+		"cloud.google.com/gke-tpu-accelerator":   "tpu-v5-lite-device",
+		"cloud.google.com/gke-accelerator-count": "4",
+		"cloud.google.com/gke-tpu-topology":      "2x2",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("getNodeLabelsFromMetadata() got = %v, want %v", got, want)
+	}
+}
+
+func TestGetNodeLabelsFromMetadata_TPUEnvFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Metadata-Flavor") != "Google" {
+			t.Errorf("missing Metadata-Flavor header")
+		}
+
+		if r.URL.Path == "/computeMetadata/v1/instance/attributes/kube-labels" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		if r.URL.Path == "/computeMetadata/v1/instance/attributes/tpu-env" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`ACCELERATOR_TYPE: 'v5litepod-8'
+CHIPS_PER_HOST_BOUNDS: '2,4,1'
+ENABLE_ICI_RESILIENCY: 'false'
+TOPOLOGY: '2x4'
+`))
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("GCE_METADATA_HOST", server.Listener.Addr().String())
+
+	got, err := getNodeLabelsFromMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := map[string]string{
+		"cloud.google.com/gke-tpu-accelerator":    "tpu-v5-lite-podslice",
+		"cloud.google.com/gke-accelerator-count":  "8",
+		"cloud.google.com/gke-tpu-topology":       "2x4",
+		"cloud.google.com/gke-tpu-ici-resiliency": "false",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("getNodeLabelsFromMetadata() got = %v, want %v", got, want)
 	}
 }
