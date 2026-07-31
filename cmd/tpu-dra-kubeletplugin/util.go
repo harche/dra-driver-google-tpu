@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"cloud.google.com/go/compute/metadata"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
 
@@ -41,6 +46,9 @@ const (
 	ProvisionOnlyTopologyMode    = "PROVISION_ONLY"
 	RootDirectory                = "/"
 	NodeIPEnv                    = "NODE_IP"
+
+	KubeLabelsPath = "instance/attributes/kube-labels"
+	TpuEnvPath     = "instance/attributes/tpu-env"
 )
 
 var (
@@ -491,4 +499,161 @@ func applyNetworkSettings(parentDir string) error {
 		return nil
 	}
 	return errors.New(strings.Join(errs, "; "))
+}
+
+// parseKubeLabels parses the comma-separated kube-labels format.
+func parseKubeLabels(raw string) map[string]string {
+	labels := make(map[string]string)
+	pairs := strings.Split(raw, ",")
+	for _, pair := range pairs {
+		parts := strings.Split(pair, "=")
+		if len(parts) == 2 {
+			labels[parts[0]] = parts[1]
+		}
+	}
+	return labels
+}
+
+// parseTpuEnv parses the multi-line tpu-env key-value format.
+func parseTpuEnv(raw string) map[string]string {
+	envMap := make(map[string]string)
+	lines := strings.Split(raw, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			value = strings.Trim(value, "'\"")
+			envMap[key] = value
+		}
+	}
+	return envMap
+}
+
+// mapTpuEnvToLabels maps parsed tpu-env variables to standard GKE labels.
+func mapTpuEnvToLabels(envMap map[string]string) map[string]string {
+	accelType := envMap["ACCELERATOR_TYPE"]
+	if accelType == "" {
+		accelType = envMap["TYPE"]
+	}
+	if accelType == "" {
+		return nil
+	}
+
+	// Map accelerator to GKE format
+	var accelerator string
+	accelTypeLower := strings.ToLower(accelType)
+	switch {
+	case strings.HasPrefix(accelTypeLower, "v5litepod"):
+		accelerator = "tpu-v5-lite-podslice"
+	case strings.HasPrefix(accelTypeLower, "v5lite"):
+		accelerator = "tpu-v5-lite-device"
+	case strings.HasPrefix(accelTypeLower, "v5p"):
+		accelerator = "tpu-v5p-slice"
+	case strings.HasPrefix(accelTypeLower, "v6e"):
+		accelerator = "tpu-v6e-slice"
+	case strings.HasPrefix(accelTypeLower, "v4"):
+		accelerator = "tpu-v4-podslice"
+	case strings.HasPrefix(accelTypeLower, "v3"):
+		accelerator = "tpu-v3-device"
+	default:
+		accelerator = accelTypeLower // fallback
+	}
+
+	// Determine chip count from CHIPS_PER_HOST_BOUNDS product
+	chipCount := "4" // default fallback
+	if chipsBounds, exists := envMap["CHIPS_PER_HOST_BOUNDS"]; exists {
+		parts := strings.Split(chipsBounds, ",")
+		product := 1
+		for _, part := range parts {
+			val, err := strconv.Atoi(strings.TrimSpace(part))
+			if err == nil {
+				product *= val
+			}
+		}
+		chipCount = strconv.Itoa(product)
+	}
+
+	// Determine topology
+	topology := envMap["TOPOLOGY"]
+	if topology == "" {
+		topology = "2x2" // default fallback
+	}
+
+	return map[string]string{
+		AcceleratorLabel:      accelerator,
+		AcceleratorCountLabel: chipCount,
+		TopologyLabel:         topology,
+		ICIResiliency:         envMap["ENABLE_ICI_RESILIENCY"],
+	}
+}
+
+// getNodeLabelsFromMetadata queries GCE MDS for `kube-labels` or falls back to `tpu-env` using the official library.
+func getNodeLabelsFromMetadata(ctx context.Context) (map[string]string, error) {
+	if !metadata.OnGCE() {
+		return nil, fmt.Errorf("not running on a GCE instance")
+	}
+
+	var labels map[string]string
+
+	err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 15*time.Second, true, func(ctx context.Context) (done bool, err error) {
+		// Try to query kube-labels
+		kubeLabelsRaw, err := metadata.GetWithContext(ctx, KubeLabelsPath)
+		if err == nil {
+			parsed := parseKubeLabels(kubeLabelsRaw)
+			if parsed[AcceleratorLabel] != "" {
+				labels = parsed
+				return true, nil
+			}
+		}
+
+		// Try to query tpu-env
+		tpuEnvRaw, err := metadata.GetWithContext(ctx, TpuEnvPath)
+		if err == nil {
+			envMap := parseTpuEnv(tpuEnvRaw)
+			mapped := mapTpuEnvToLabels(envMap)
+			if mapped != nil && mapped[AcceleratorLabel] != "" {
+				labels = mapped
+				return true, nil
+			}
+		}
+
+		klog.Infof("could not get kube-labels or tpu-env on GCE ... retrying")
+		return false, nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node labels from metadata server: %w", err)
+	}
+
+	return labels, nil
+}
+
+// getTPUNodeLabels retrieves TPU labels from GCE metadata, direct hardware discovery, or Kubernetes API.
+func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, error) {
+	klog.Info("Attempting to fetch TPU labels from GCE metadata server 'kube-labels'")
+	labels, err := getNodeLabelsFromMetadata(ctx)
+	if err == nil && labels[AcceleratorLabel] != "" {
+		klog.Infof("Successfully fetched TPU labels from GCE metadata: %v", labels)
+		return labels, nil
+	}
+	if err != nil {
+		klog.V(3).Infof("Failed to fetch labels from GCE metadata server: %v", err)
+	}
+
+	if config.coreclient != nil && config.flags.nodeName != "" {
+		klog.Infof("Attempting to fetch node %q labels from Kubernetes API", config.flags.nodeName)
+		node, err := config.coreclient.CoreV1().Nodes().Get(ctx, config.flags.nodeName, metav1.GetOptions{})
+		if err == nil {
+			klog.Infof("Successfully fetched node labels from Kubernetes API")
+			return node.Labels, nil
+		}
+		klog.V(3).Infof("Failed to fetch node labels from Kubernetes API: %v", err)
+	}
+
+	return nil, fmt.Errorf("failed to obtain TPU information from metadata server, hardware discovery, or Kubernetes API")
 }
