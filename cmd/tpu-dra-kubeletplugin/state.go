@@ -181,7 +181,19 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
 
-	results := claim.Status.Allocation.Devices.Results
+	// A ResourceClaim can carry allocation results for more than one driver, so
+	// take this driver's own results before counting or resolving anything. The
+	// checks below are all about TPUs on this node: a device owned by another
+	// driver is neither part of the chip count nor findable in s.allocatable,
+	// and result.Driver is the only authoritative statement of ownership.
+	var results []resourceapi.DeviceRequestAllocationResult
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != DriverName {
+			continue
+		}
+		results = append(results, result)
+	}
+
 	if len(results) != s.tm.tpuChipCount {
 		return nil, fmt.Errorf("invalid tpu resourceClaim, claim requests partial tpu devices (%d), only requests for all tpu devices (%d) on the node are supported", len(results), s.tm.tpuChipCount)
 	}
