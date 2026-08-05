@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/urfave/cli/v2"
@@ -166,13 +167,21 @@ func StartPlugin(ctx context.Context, config *Config) error {
 		return fmt.Errorf("path for cdi file generation is not a directory: '%v'", err)
 	}
 
-	// Only write "Y" to this file location if it exists. Otherwise, do nothing.
-	if _, err := os.Stat(allowUnsafeInterruptsFile); err == nil {
-		// Permission 0644 = readable by all user groups, but writable by this user only.
-		if err := os.WriteFile(allowUnsafeInterruptsFile, []byte("Y"), 0644); err != nil {
-			panic(err)
+	// Only write "Y" to this file location if it exists and is not already
+	// set. Otherwise, do nothing. Skipping the write when the value is
+	// already "Y" keeps the plugin working in environments where /sys is
+	// mounted read-only (for example kind) but the host has the parameter
+	// set.
+	if current, err := os.ReadFile(allowUnsafeInterruptsFile); err == nil {
+		if strings.TrimSpace(string(current)) == "Y" {
+			klog.Infof("unsafe interrupts already allowed")
+		} else {
+			// Permission 0644 = readable by all user groups, but writable by this user only.
+			if err := os.WriteFile(allowUnsafeInterruptsFile, []byte("Y"), 0644); err != nil {
+				panic(err)
+			}
+			klog.Infof("successfully allowed unsafe interrupts")
 		}
-		klog.Infof("successfully allowed unsafe interrupts")
 	}
 
 	// setup signal for graceful shutdown
