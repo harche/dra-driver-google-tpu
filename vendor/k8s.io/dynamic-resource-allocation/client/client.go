@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	cgoresource "k8s.io/client-go/kubernetes/typed/resource/v1"
 	rest "k8s.io/client-go/rest"
+	"k8s.io/client-go/util/watchlist"
 )
 
 // Enumerate all supported APIs, most preferred first.
@@ -79,6 +80,16 @@ func (c *Client) DeviceClasses() cgoresource.DeviceClassInterface {
 	)
 }
 
+func (c *Client) DeviceTaintRules() cgoresource.DeviceTaintRuleInterface {
+	return newConvertingClient(c,
+		c.clientSet.ResourceV1().DeviceTaintRules(),
+		// DeviceTaintRules isn't in v1beta1 but newConvertingClient expects this.
+		// We can simply treat it like v1beta2.
+		c.clientSet.ResourceV1beta2().DeviceTaintRules(),
+		c.clientSet.ResourceV1beta2().DeviceTaintRules(),
+	)
+}
+
 func (c *Client) ResourceClaims(namespace string) cgoresource.ResourceClaimInterface {
 	return newConvertingClient(c,
 		c.clientSet.ResourceV1().ResourceClaims(namespace),
@@ -101,4 +112,15 @@ func (c *Client) ResourceSlices() cgoresource.ResourceSliceInterface {
 		c.clientSet.ResourceV1beta1().ResourceSlices(),
 		c.clientSet.ResourceV1beta2().ResourceSlices(),
 	)
+}
+
+// IsWatchListSemanticsUnSupported informs the reflector that this client
+// doesn't support WatchList semantics.
+//
+// This is a synthetic method whose sole purpose is to satisfy the optional
+// interface check performed by the reflector.
+// Returning true signals that WatchList can NOT be used.
+// No additional logic is implemented here.
+func (c *Client) IsWatchListSemanticsUnSupported() bool {
+	return watchlist.DoesClientNotSupportWatchListSemantics(c.clientSet)
 }

@@ -105,6 +105,9 @@ func NewDriver(ctx context.Context,
 		kubeletplugin.Serialize(true),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// Device health reporting (KEP-4680) is not implemented yet, so do
+		// not advertise the health service to the kubelet.
+		kubeletplugin.HealthService(false),
 	)
 	if err != nil {
 		return nil, err
@@ -221,6 +224,14 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 	}
 
 	return unpreparedResults, nil
+}
+
+// WatchHealthStatus implements [kubeletplugin.DRAPlugin]. Device health
+// reporting (KEP-4680) is not implemented yet; the service is not advertised
+// (see the HealthService option in Start), so answer any stray subscription
+// accordingly.
+func (d *driver) WatchHealthStatus(ctx context.Context, reports chan<- kubeletplugin.DeviceHealthReport) error {
+	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
