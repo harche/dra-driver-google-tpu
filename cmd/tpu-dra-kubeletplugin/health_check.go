@@ -43,16 +43,21 @@ type TPUHealthChecker struct {
 	state        *DeviceState
 	stop         chan bool
 	tpuGen       string
+	// broadcaster notifies WatchHealthStatus subscribers after every
+	// probing pass so they send a fresh health report (see
+	// device_health_status.go).
+	broadcaster *healthBroadcaster
 }
 
 // NewTPUHealthChecker returns a TPUHealthChecker object for a given device name.
-func NewTPUHealthChecker(devices AllocatableDevices, state *DeviceState, devDirectory string, tpuGen string) *TPUHealthChecker {
+func NewTPUHealthChecker(devices AllocatableDevices, state *DeviceState, devDirectory string, tpuGen string, broadcaster *healthBroadcaster) *TPUHealthChecker {
 	hc := &TPUHealthChecker{
 		devices:      make(map[string]AllocatableDevice),
 		state:        state,
 		devDirectory: devDirectory,
 		stop:         make(chan bool),
 		tpuGen:       tpuGen,
+		broadcaster:  broadcaster,
 	}
 
 	// Cloning the device map to avoid interfering with the device manager
@@ -124,6 +129,12 @@ func (hc *TPUHealthChecker) monitorDevDir() error {
 						klog.Errorf("failed to update health for device %s: %v", id, err)
 					}
 				}
+			}
+			// Report to the kubelet on every pass, changed or not: the send
+			// is the heartbeat which keeps the kubelet's health data fresh
+			// (KEP-4680), and vouches only for what this pass verified.
+			if hc.broadcaster != nil {
+				hc.broadcaster.broadcast()
 			}
 		}
 	}

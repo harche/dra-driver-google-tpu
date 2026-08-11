@@ -40,7 +40,10 @@ type driver struct {
 	pluginHelper  *kubeletplugin.Helper
 	deviceState   *DeviceState
 	healthchecker *TPUHealthChecker
-	config        *Config
+	// health fans device health reports out to WatchHealthStatus
+	// subscriptions (see device_health_status.go).
+	health *healthBroadcaster
+	config *Config
 }
 
 func NewDriver(ctx context.Context,
@@ -82,7 +85,9 @@ func NewDriver(ctx context.Context,
 		return nil, err
 	}
 
-	hc := NewTPUHealthChecker(state.allocatable, state, devDir, tpuGen)
+	health := newHealthBroadcaster(state, config.flags.nodeName)
+
+	hc := NewTPUHealthChecker(state.allocatable, state, devDir, tpuGen, health)
 	if err = hc.Start(); err != nil {
 		return nil, fmt.Errorf("healthchecker failed to start")
 	}
@@ -92,6 +97,7 @@ func NewDriver(ctx context.Context,
 		deviceState:   state,
 		config:        config,
 		healthchecker: hc,
+		health:        health,
 	}
 
 	helper, err := kubeletplugin.Start(
@@ -105,9 +111,9 @@ func NewDriver(ctx context.Context,
 		kubeletplugin.Serialize(true),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
-		// Device health reporting (KEP-4680) is not implemented yet, so do
-		// not advertise the health service to the kubelet.
-		kubeletplugin.HealthService(false),
+		// KEP-4680: report the health of allocated TPUs to the kubelet so it
+		// surfaces in pod.status.containerStatuses[].allocatedResourcesStatus.
+		kubeletplugin.HealthService(true),
 	)
 	if err != nil {
 		return nil, err
@@ -224,14 +230,6 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 	}
 
 	return unpreparedResults, nil
-}
-
-// WatchHealthStatus implements [kubeletplugin.DRAPlugin]. Device health
-// reporting (KEP-4680) is not implemented yet; the service is not advertised
-// (see the HealthService option in Start), so answer any stray subscription
-// accordingly.
-func (d *driver) WatchHealthStatus(ctx context.Context, reports chan<- kubeletplugin.DeviceHealthReport) error {
-	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
