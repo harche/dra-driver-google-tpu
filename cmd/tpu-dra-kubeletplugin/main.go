@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/urfave/cli/v2"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -40,6 +42,9 @@ const (
 
 	DriverPluginCheckpointFile = "checkpoint.json"
 	allowUnsafeInterruptsFile  = "/sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts"
+
+	// noTPURetryPeriod is how often a node without TPU is probed again.
+	noTPURetryPeriod = time.Minute
 )
 
 type Flags struct {
@@ -52,6 +57,13 @@ type Flags struct {
 
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
+
+	// TPU properties of the node. When left empty they are auto discovered.
+	tpuAccelerator   string
+	tpuChipCount     string
+	tpuTopology      string
+	tpuICIResiliency string
+	tpuEnvFilePath   string
 }
 
 type Config struct {
@@ -111,6 +123,37 @@ func newApp() *cli.App {
 			Value:       kubeletplugin.KubeletPluginsDir,
 			Destination: &flags.kubeletPluginsDirectoryPath,
 			EnvVars:     []string{"KUBELET_PLUGINS_DIRECTORY_PATH"},
+		},
+		&cli.StringFlag{
+			Name:        "tpu-accelerator",
+			Usage:       "TPU accelerator type of the node, e.g. tpu-v6e-slice. Overrides auto discovery.",
+			Destination: &flags.tpuAccelerator,
+			EnvVars:     []string{"TPU_ACCELERATOR"},
+		},
+		&cli.StringFlag{
+			Name:        "tpu-chip-count",
+			Usage:       "Number of TPU chips on the node. Overrides auto discovery.",
+			Destination: &flags.tpuChipCount,
+			EnvVars:     []string{"TPU_CHIP_COUNT"},
+		},
+		&cli.StringFlag{
+			Name:        "tpu-topology",
+			Usage:       "TPU topology of the slice the node belongs to, e.g. 2x4. Overrides auto discovery.",
+			Destination: &flags.tpuTopology,
+			EnvVars:     []string{"TPU_TOPOLOGY"},
+		},
+		&cli.StringFlag{
+			Name:        "tpu-ici-resiliency",
+			Usage:       "Whether ICI resiliency is enabled for the slice the node belongs to.",
+			Destination: &flags.tpuICIResiliency,
+			EnvVars:     []string{"TPU_ICI_RESILIENCY"},
+		},
+		&cli.StringFlag{
+			Name:        "tpu-env-file",
+			Usage:       "Absolute path to the tpu-env file written by the Cloud TPU runtime on the host.",
+			Value:       "/etc/tpu/tpu-env",
+			Destination: &flags.tpuEnvFilePath,
+			EnvVars:     []string{"TPU_ENV_FILE"},
 		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
@@ -178,7 +221,7 @@ func StartPlugin(ctx context.Context, config *Config) error {
 		} else {
 			// Permission 0644 = readable by all user groups, but writable by this user only.
 			if err := os.WriteFile(allowUnsafeInterruptsFile, []byte("Y"), 0644); err != nil {
-				panic(err)
+				return fmt.Errorf("unable to allow unsafe interrupts: %w", err)
 			}
 			klog.Infof("successfully allowed unsafe interrupts")
 		}
@@ -202,8 +245,22 @@ func StartPlugin(ctx context.Context, config *Config) error {
 		ctx,
 		config,
 	)
-	if err != nil {
-		return err
+	for err != nil {
+		// The driver is deployed on every node of heterogeneous clusters and a
+		// node may get its TPU devices after the plugin started, so a node
+		// without TPU must neither crash loop nor give up.
+		if !errors.Is(err, errNoTPUDetected) {
+			return err
+		}
+		klog.Infof("No TPU detected on node %q, retrying in %s. Set --tpu-accelerator if this node does have a TPU.", config.flags.nodeName, noTPURetryPeriod)
+		select {
+		case <-sigc:
+			return nil
+		case <-ctx.Done():
+			return nil
+		case <-time.After(noTPURetryPeriod):
+		}
+		driver, err = NewDriver(ctx, config)
 	}
 
 	<-sigc

@@ -52,18 +52,35 @@ kubeletPlugin:
   podAnnotations: {}
   podSecurityContext: {}
   nodeSelector: {}
-  tolerations: []
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: cloud.google.com/gke-tpu-accelerator
-            operator: Exists
-          - key: cloud.google.com/gke-tpu-dra-driver
-            operator: In
-            values:
-            - "true"
+  # TPUs are usually tainted so that only TPU workloads land on them.
+  tolerations:
+  - key: google.com/tpu
+    operator: Exists
+    effect: NoSchedule
+  # By default the plugin runs on every node, detects whether the node has a TPU
+  # and stays idle when it has none, so no platform specific label is needed.
+  # Restrict it to a subset of the nodes by setting an affinity, for example on
+  # GKE:
+  #
+  # affinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #       - matchExpressions:
+  #         - key: cloud.google.com/gke-tpu-accelerator
+  #           operator: Exists
+  affinity: {}
+  # Description of the TPU attached to the node. The number of chips and, for a
+  # single host TPU, the topology are probed from the host. The accelerator type
+  # is read from the host tpu-env file, the cloud metadata server or the node
+  # labels. Set the properties the platform does not provide.
+  tpu:
+    accelerator: ""
+    chipCount: ""
+    topology: ""
+    iciResiliency: ""
+    # Path on the host of the tpu-env file written by the Cloud TPU runtime.
+    envFilePath: /etc/tpu/tpu-env
   kubeletRegistrarDirectoryPath: /var/lib/kubelet/plugins_registry
   kubeletPluginsDirectoryPath: /var/lib/kubelet/plugins
   containers:
@@ -74,3 +91,14 @@ kubeletPlugin:
       securityContext:
         privileged: true
       resources: {}
+    # Cloud TPU specific helpers. They rely on images that are only published
+    # for Google Cloud, disable them when running on other platforms.
+    networkOptimizer:
+      enabled: true
+      image: "gcr.io/gke-release/tpu_network_optimizer:tpu_network_optimizer_20250625.00_p0@sha256:0404b7f8ce86b25284a844ee4935c8927cd2572c1d6b07d1d2bd944f215fb80d"
+    logCollector:
+      enabled: true
+      image: "gcr.io/gke-release/gke-distroless/bash:gke_distroless_20250807.00_p0@sha256:4de2c75a1f363c26c4f74bdd702d313410267c464a059b4fa32ac5d4cf10aba9"
+    vbarControlAgent:
+      enabled: true
+      image: "gcr.io/gke-release/vbar_control_agent@sha256:631a35b6cc0638b3eed328ccea240199043dcfe4bed69c7cfc3d98752faa23fb"

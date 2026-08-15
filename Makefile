@@ -25,7 +25,7 @@ CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := lint helm-lint
-MAKE_TARGETS := binaries build check vendor fmt test cmds coverage $(CHECK_TARGETS)
+MAKE_TARGETS := binaries build check vendor fmt test test-e2e cmds coverage $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -64,6 +64,10 @@ helm-lint:
 COVERAGE_FILE := coverage.out
 test: build cmds
 	go test -v -coverprofile=$(COVERAGE_FILE) $(MODULE)/...
+
+# Creates a kind cluster with fake TPU devices, see tests/README.md
+test-e2e:
+	bats -o _artifacts --print-output-on-failure tests/
 
 coverage: test
 	cat $(COVERAGE_FILE) | grep -v "_mock.go" > $(COVERAGE_FILE).no-mocks

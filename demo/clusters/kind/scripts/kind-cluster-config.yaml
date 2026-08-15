@@ -8,4 +8,4 @@ nodes:
     kind: JoinConfiguration
     nodeRegistration:
       kubeletExtraArgs:
-        node-labels: "cloud.google.com/gke-tpu-accelerator=tpu-v4-podslice,cloud.google.com/gke-tpu-topology=2x2x1,cloud.google.com/gke-accelerator-count=4,cloud.google.com/gke-tpu-dra-driver=true"
+        node-labels: "tpu.google.com/accelerator=tpu-v4-podslice"

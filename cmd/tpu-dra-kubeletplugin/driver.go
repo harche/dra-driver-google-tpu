@@ -23,7 +23,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
@@ -36,7 +35,6 @@ const (
 )
 
 type driver struct {
-	client        coreclientset.Interface
 	pluginHelper  *kubeletplugin.Helper
 	deviceState   *DeviceState
 	healthchecker *TPUHealthChecker
@@ -49,15 +47,14 @@ type driver struct {
 func NewDriver(ctx context.Context,
 	config *Config) (*driver, error) {
 
-	err := ApplyNetworkSettings()
-	if err != nil {
-		klog.Errorf("error applying network settings: %v", err)
-	}
-
 	// Fetch node labels.
 	nodeLabels, err := getTPUNodeLabels(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TPU node labels: %w", err)
+	}
+
+	if err := ApplyNetworkSettings(); err != nil {
+		klog.Errorf("error applying network settings: %v", err)
 	}
 
 	model := nodeLabels[AcceleratorLabel]
@@ -70,13 +67,14 @@ func NewDriver(ctx context.Context,
 		return nil, fmt.Errorf("error fetching accelerator generation: %w", err)
 	}
 
-	// Determine device directory based on TPU generation.
-	var devDir string
-	switch tpuGen {
-	case "v3", "v4", "v4lite":
-		devDir = devDirectory
-	case "v5p", "v5lite", "v5litepod", "v6e":
-		devDir = devDirectoryVfio
+	// Determine device directory based on TPU generation. The probed hardware
+	// wins over the generation, which does not know about future TPUs.
+	devDir := devDirectoryForGen(tpuGen)
+	if hardware, err := probeTPUHardware(RootDirectory); err == nil {
+		devDir = hardware.devDirectory
+	}
+	if devDir == "" {
+		return nil, fmt.Errorf("cannot determine the device directory of TPU generation %q", tpuGen)
 	}
 
 	triggerPublishChan := make(chan interface{}, 1)
@@ -93,7 +91,6 @@ func NewDriver(ctx context.Context,
 	}
 
 	driver := &driver{
-		client:        config.coreclient,
 		deviceState:   state,
 		config:        config,
 		healthchecker: hc,
@@ -129,6 +126,18 @@ func NewDriver(ctx context.Context,
 
 	klog.Info("Published resourceslice")
 	return driver, nil
+}
+
+// devDirectoryForGen returns the directory holding the chip devices of a TPU
+// generation, or an empty string for generations released after this driver.
+func devDirectoryForGen(tpuGen string) string {
+	switch tpuGen {
+	case "v3", "v4", "v4lite":
+		return devDirectory
+	case "v5p", "v5lite", "v5litepod", "v6e":
+		return devDirectoryVfio
+	}
+	return ""
 }
 
 func (d *driver) GatherStateAndPublish(ctx context.Context) error {

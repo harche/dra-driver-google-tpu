@@ -34,9 +34,10 @@ spec:
       serviceAccountName: {{ include "dra-driver-google-tpu.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
+      {{- if .Values.kubeletPlugin.containers.networkOptimizer.enabled }}
       initContainers:
       - name: "tpu-network-optimization"
-        image: "gcr.io/gke-release/tpu_network_optimizer:tpu_network_optimizer_20250625.00_p0@sha256:0404b7f8ce86b25284a844ee4935c8927cd2572c1d6b07d1d2bd944f215fb80d"
+        image: {{ .Values.kubeletPlugin.containers.networkOptimizer.image | quote }}
         securityContext:
           privileged: true
         command:
@@ -46,6 +47,7 @@ spec:
           mountPath: /sys
         - name: proc
           mountPath: /proc
+      {{- end }}
       containers:
       - name: tpu-dra-plugin
         securityContext:
@@ -80,6 +82,24 @@ spec:
               fieldPath: status.hostIP
         - name: DEVICE_CLASSES
           value: {{ .Values.deviceClasses | join "," }}
+        - name: TPU_ENV_FILE
+          value: {{ .Values.kubeletPlugin.tpu.envFilePath | quote }}
+        {{- with .Values.kubeletPlugin.tpu.accelerator }}
+        - name: TPU_ACCELERATOR
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.kubeletPlugin.tpu.chipCount }}
+        - name: TPU_CHIP_COUNT
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.kubeletPlugin.tpu.topology }}
+        - name: TPU_TOPOLOGY
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.kubeletPlugin.tpu.iciResiliency }}
+        - name: TPU_ICI_RESILIENCY
+          value: {{ . | quote }}
+        {{- end }}
         volumeMounts:
         - name: plugins-registry
           mountPath: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
@@ -97,8 +117,12 @@ spec:
           mountPath: /var/lib/kubelet/pod-resources
         - name: tpu-logs
           mountPath: /tmp/tpu_logs
+        - name: tpu-env
+          readOnly: true
+          mountPath: /etc/tpu
+      {{- if .Values.kubeletPlugin.containers.logCollector.enabled }}
       - name: sidecar-log-collector
-        image: "gcr.io/gke-release/gke-distroless/bash:gke_distroless_20250807.00_p0@sha256:4de2c75a1f363c26c4f74bdd702d313410267c464a059b4fa32ac5d4cf10aba9"
+        image: {{ .Values.kubeletPlugin.containers.logCollector.image | quote }}
         securityContext:
           runAsUser: 1000
           runAsGroup: 1000
@@ -124,8 +148,10 @@ spec:
         - name: tpu-logs
           readOnly: true
           mountPath: /tmp/tpu_logs
+      {{- end }}
+      {{- if .Values.kubeletPlugin.containers.vbarControlAgent.enabled }}
       - name: vbar-control-agent
-        image: "gcr.io/gke-release/vbar_control_agent@sha256:631a35b6cc0638b3eed328ccea240199043dcfe4bed69c7cfc3d98752faa23fb"
+        image: {{ .Values.kubeletPlugin.containers.vbarControlAgent.image | quote }}
         env:
         - name: TPU_SKIP_MDS_QUERY
           value: 'true'
@@ -144,6 +170,7 @@ spec:
             memory: 150Mi
         command: ["vbar_control_agent_files/bin/vbar_control_agent"]
         args: ['--logtostderr', '--census_enabled=false', '--gid=', '--uid=', '--chroot=']
+      {{- end }}
       volumes:
       - name: plugins-registry
         hostPath:

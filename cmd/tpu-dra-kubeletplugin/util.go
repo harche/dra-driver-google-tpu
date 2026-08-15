@@ -35,23 +35,46 @@ import (
 )
 
 const (
-	AcceleratorLabel             = "cloud.google.com/gke-tpu-accelerator"
-	AcceleratorCountLabel        = "cloud.google.com/gke-accelerator-count"
-	AcceleratorTopologyModeLabel = "cloud.google.com/gke-accelerator-topology-mode"
-	TopologyLabel                = "cloud.google.com/gke-tpu-topology"
-	ICIResiliency                = "cloud.google.com/gke-tpu-ici-resiliency"
-	twist                        = "false"
-	vlpMaxTopologyDim            = 16
-	ICIResiliencyEnv             = "ENABLE_ICI_RESILIENCY"
-	ProvisionOnlyTopologyMode    = "PROVISION_ONLY"
-	RootDirectory                = "/"
-	NodeIPEnv                    = "NODE_IP"
+	// Canonical, vendor neutral node labels the driver understands. Any
+	// platform can set these directly, no cloud provider integration is
+	// required.
+	AcceleratorLabel      = DriverName + "/accelerator"
+	AcceleratorCountLabel = DriverName + "/chip-count"
+	TopologyLabel         = DriverName + "/topology"
+	ICIResiliency         = DriverName + "/ici-resiliency"
+
+	// GKE advertises the same information under its own label keys.
+	gkeAcceleratorLabel      = "cloud.google.com/gke-tpu-accelerator"
+	gkeAcceleratorCountLabel = "cloud.google.com/gke-accelerator-count"
+	gkeTopologyLabel         = "cloud.google.com/gke-tpu-topology"
+	gkeICIResiliencyLabel    = "cloud.google.com/gke-tpu-ici-resiliency"
+
+	twist             = "false"
+	vlpMaxTopologyDim = 16
+	ICIResiliencyEnv  = "ENABLE_ICI_RESILIENCY"
+	RootDirectory     = "/"
+	NodeIPEnv         = "NODE_IP"
 
 	KubeLabelsPath = "instance/attributes/kube-labels"
 	TpuEnvPath     = "instance/attributes/tpu-env"
 )
 
+// errNoTPUDetected is returned when the node the driver runs on does not expose
+// any TPU hardware. It is not a fatal condition: the driver is expected to be
+// deployed on heterogeneous clusters where only a subset of nodes has TPUs.
+var errNoTPUDetected = errors.New("no TPU hardware detected on this node")
+
 var (
+	// canonicalLabelAliases maps every canonical TPU label to the equivalent
+	// keys used by known platforms. Add an entry here to support a new
+	// platform without touching the rest of the driver.
+	canonicalLabelAliases = map[string][]string{
+		AcceleratorLabel:      {gkeAcceleratorLabel},
+		AcceleratorCountLabel: {gkeAcceleratorCountLabel},
+		TopologyLabel:         {gkeTopologyLabel},
+		ICIResiliency:         {gkeICIResiliencyLabel},
+	}
+
 	acceleratorRegex     = regexp.MustCompile(`^tpu\d+[a-z]?$`)
 	pastAcceleratorRegex = regexp.MustCompile(`^tpu-v\d+([ep]?-slice)?((?:-lite)?-(device|podslice))?$`)
 
@@ -244,7 +267,7 @@ func GetEnvName(envName string) (string, error) {
 func ChipCount(chipCount string) (int, error) {
 	count, err := strconv.Atoi(chipCount)
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("invalid TPU chip count %q", chipCount)
 	}
 	return count, nil
 }
@@ -534,7 +557,7 @@ func parseTpuEnv(raw string) map[string]string {
 	return envMap
 }
 
-// mapTpuEnvToLabels maps parsed tpu-env variables to standard GKE labels.
+// mapTpuEnvToLabels maps parsed tpu-env variables to the canonical TPU labels.
 func mapTpuEnvToLabels(envMap map[string]string) map[string]string {
 	accelType := envMap["ACCELERATOR_TYPE"]
 	if accelType == "" {
@@ -544,7 +567,7 @@ func mapTpuEnvToLabels(envMap map[string]string) map[string]string {
 		return nil
 	}
 
-	// Map accelerator to GKE format
+	// Map accelerator to the "tpu-<gen>-<form factor>" naming used by the labels.
 	var accelerator string
 	accelTypeLower := strings.ToLower(accelType)
 	switch {
@@ -604,7 +627,7 @@ func getNodeLabelsFromMetadata(ctx context.Context) (map[string]string, error) {
 		// Try to query kube-labels
 		kubeLabelsRaw, err := metadata.GetWithContext(ctx, KubeLabelsPath)
 		if err == nil {
-			parsed := parseKubeLabels(kubeLabelsRaw)
+			parsed := normalizeTPULabels(parseKubeLabels(kubeLabelsRaw))
 			if parsed[AcceleratorLabel] != "" {
 				labels = parsed
 				return true, nil
@@ -633,27 +656,160 @@ func getNodeLabelsFromMetadata(ctx context.Context) (map[string]string, error) {
 	return labels, nil
 }
 
-// getTPUNodeLabels retrieves TPU labels from GCE metadata, direct hardware discovery, or Kubernetes API.
-func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, error) {
-	klog.Info("Attempting to fetch TPU labels from GCE metadata server 'kube-labels'")
-	labels, err := getNodeLabelsFromMetadata(ctx)
-	if err == nil && labels[AcceleratorLabel] != "" {
-		klog.Infof("Successfully fetched TPU labels from GCE metadata: %v", labels)
-		return labels, nil
-	}
-	if err != nil {
-		klog.V(3).Infof("Failed to fetch labels from GCE metadata server: %v", err)
-	}
-
-	if config.coreclient != nil && config.flags.nodeName != "" {
-		klog.Infof("Attempting to fetch node %q labels from Kubernetes API", config.flags.nodeName)
-		node, err := config.coreclient.CoreV1().Nodes().Get(ctx, config.flags.nodeName, metav1.GetOptions{})
-		if err == nil {
-			klog.Infof("Successfully fetched node labels from Kubernetes API")
-			return node.Labels, nil
+// normalizeTPULabels translates the TPU labels of any known platform to the
+// canonical keys used internally by the driver. Labels unrelated to TPUs and
+// keys without a value are dropped.
+func normalizeTPULabels(labels map[string]string) map[string]string {
+	normalized := make(map[string]string, len(canonicalLabelAliases))
+	for canonical, aliases := range canonicalLabelAliases {
+		keys := append([]string{canonical}, aliases...)
+		for _, key := range keys {
+			if value := labels[key]; value != "" {
+				normalized[canonical] = value
+				break
+			}
 		}
-		klog.V(3).Infof("Failed to fetch node labels from Kubernetes API: %v", err)
+	}
+	return normalized
+}
+
+// labelsFromConfig builds the canonical TPU labels from the driver command line
+// flags. It allows running on hardware the driver cannot introspect on its own.
+func labelsFromConfig(f *Flags) (map[string]string, error) {
+	labels := normalizeTPULabels(map[string]string{
+		AcceleratorLabel:      f.tpuAccelerator,
+		AcceleratorCountLabel: f.tpuChipCount,
+		TopologyLabel:         f.tpuTopology,
+		ICIResiliency:         f.tpuICIResiliency,
+	})
+	if labels[AcceleratorLabel] == "" {
+		return nil, fmt.Errorf("TPU accelerator not configured")
+	}
+	return labels, nil
+}
+
+// labelsFromTPUEnvFile derives the canonical TPU labels from the tpu-env file
+// written by the Cloud TPU runtime on the host, e.g. /etc/tpu/tpu-env.
+func labelsFromTPUEnvFile(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, fmt.Errorf("no tpu-env file configured")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	labels := mapTpuEnvToLabels(parseTpuEnv(string(raw)))
+	if labels[AcceleratorLabel] == "" {
+		return nil, fmt.Errorf("%s does not describe a TPU", path)
+	}
+	return labels, nil
+}
+
+// labelsFromNode derives the canonical TPU labels from the labels the platform
+// set on the Node object. The driver only reads them, what it discovers is
+// published on the devices of the ResourceSlice.
+func labelsFromNode(ctx context.Context, config *Config) (map[string]string, error) {
+	if config.coreclient == nil || config.flags.nodeName == "" {
+		return nil, fmt.Errorf("no Kubernetes client available")
+	}
+	node, err := config.coreclient.CoreV1().Nodes().Get(ctx, config.flags.nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return normalizeTPULabels(node.Labels), nil
+}
+
+// getTPUNodeLabels describes the TPU of the local node with the canonical
+// labels. Sources are tried in order of decreasing precedence so that an
+// explicit configuration always wins over auto discovery, and whatever is left
+// unknown is completed from the hardware itself. It returns errNoTPUDetected
+// when no source and no device knows about a TPU on this node.
+func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, error) {
+	sources := []struct {
+		name string
+		get  func(context.Context) (map[string]string, error)
+	}{
+		{"driver configuration", func(context.Context) (map[string]string, error) {
+			return labelsFromConfig(config.flags)
+		}},
+		{fmt.Sprintf("tpu-env file %q", config.flags.tpuEnvFilePath), func(context.Context) (map[string]string, error) {
+			return labelsFromTPUEnvFile(config.flags.tpuEnvFilePath)
+		}},
+		{"GCE metadata server", getNodeLabelsFromMetadata},
+		{"Kubernetes node object", func(ctx context.Context) (map[string]string, error) {
+			return labelsFromNode(ctx, config)
+		}},
 	}
 
-	return nil, fmt.Errorf("failed to obtain TPU information from metadata server, hardware discovery, or Kubernetes API")
+	// The hardware is the ground truth for the presence of a TPU: the
+	// accelerator type may be configured cluster wide, for every node. Probing
+	// it first also keeps the other sources, one of which is a metadata server
+	// over the network, out of the retry loop of a node without a TPU.
+	hardware, err := probeTPUHardware(RootDirectory)
+	if err != nil {
+		return nil, err
+	}
+	klog.Infof("Found %d TPU chips in %s", hardware.chipCount, hardware.devDirectory)
+
+	labels := map[string]string{}
+	for _, source := range sources {
+		found, err := source.get(ctx)
+		if err != nil {
+			klog.V(3).Infof("No TPU information from %s: %v", source.name, err)
+			continue
+		}
+		if found[AcceleratorLabel] == "" {
+			klog.V(3).Infof("No TPU information from %s", source.name)
+			continue
+		}
+		klog.Infof("Discovered TPU %v from %s", found, source.name)
+		labels = found
+		break
+	}
+
+	completeLabelsFromHardware(labels, hardware)
+	if labels[AcceleratorLabel] == "" {
+		return nil, fmt.Errorf("found %d TPU chips in %s but no source knows their type, set --tpu-accelerator or the %s node label",
+			hardware.chipCount, hardware.devDirectory, AcceleratorLabel)
+	}
+	return labels, nil
+}
+
+// completeLabelsFromHardware fills in the TPU properties that no source knew
+// about with the ones observed on the host.
+func completeLabelsFromHardware(labels map[string]string, hardware *tpuHardware) {
+	chipCount := strconv.Itoa(hardware.chipCount)
+	switch labels[AcceleratorCountLabel] {
+	case "":
+		labels[AcceleratorCountLabel] = chipCount
+	case chipCount:
+	default:
+		klog.Warningf("Node is labeled with %s TPU chips but %s holds %s devices", labels[AcceleratorCountLabel], hardware.devDirectory, chipCount)
+	}
+
+	if labels[TopologyLabel] == "" {
+		if topology := singleHostTopology(hardware.chipCount); topology != "" {
+			klog.Infof("Assuming the single host topology %s for %d TPU chips", topology, hardware.chipCount)
+			labels[TopologyLabel] = topology
+		}
+	}
+}
+
+// singleHostTopology returns the topology of a single host TPU with the given
+// number of chips. Nodes that are part of a multi host slice must get their
+// topology from the platform, it cannot be observed locally.
+func singleHostTopology(chipCount int) string {
+	dims, ok := requestedChipCountToChipsPerDimNumaAligned[chipCount]
+	if !ok {
+		return ""
+	}
+	// Trailing dimensions of a single chip are implicit, 2x4x1 is written 2x4.
+	for len(dims) > 2 && dims[len(dims)-1] == 1 {
+		dims = dims[:len(dims)-1]
+	}
+	parts := make([]string, 0, len(dims))
+	for _, dim := range dims {
+		parts = append(parts, strconv.FormatInt(dim, 10))
+	}
+	return strings.Join(parts, "x")
 }

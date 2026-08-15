@@ -226,6 +226,229 @@ curl http://localhost:8000/v1/chat/completions \
 
 ---
 
+### Path C: Vanilla Kubernetes on GCE
+
+This path creates an upstream Kubernetes cluster with `kubeadm` on Compute
+Engine VMs, with a TPU VM joined as a worker. Nothing in the cluster knows what a
+TPU is: there is no cloud controller labelling the nodes and no TPU aware
+scheduling, which makes it a good check that the driver works on any conformant
+cluster.
+
+The cluster is one control plane VM, one CPU worker and one single host TPU VM
+(a `ct6e` Compute Engine instance). Nodes bootstrap themselves through
+`cloud-init` and report progress through GCE guest attributes, so no SSH access
+is needed.
+
+Pods are addressed from a GCE alias IP range per node, carved out of a secondary
+range of the subnet, so pod traffic is routed natively by the VPC with no overlay
+and no cloud routes. The `cloud-controller-manager` from
+[cloud-provider-gcp](https://github.com/kubernetes/cloud-provider-gcp) reads
+those ranges back to set the node CIDRs (`--cidr-allocator-type=CloudAllocator`),
+and brings Service type LoadBalancer and the zone/region topology labels with it.
+
+```bash
+PROJECT=my-project ZONE=us-central1-a ./demo/clusters/gce/create-kubeadm-tpu-cluster.sh
+```
+
+The script installs the driver, telling it only the accelerator type, which it
+derives from the machine type:
+
+```bash
+./demo/scripts/install-dra-driver.sh --set kubeletPlugin.tpu.accelerator=tpu-v6e-slice
+```
+
+Everything else is discovered: the driver probes the chips and publishes a
+ResourceSlice, which the script waits for before it returns. The other two nodes
+run the same DaemonSet and stay idle.
+
+#### What you should see
+
+The node CIDRs are the alias ranges GCE handed out, not something allocated in
+cluster. The script prints them before it installs the driver:
+
+```console
+$ kubectl get nodes -o custom-columns='NAME:.metadata.name,PODCIDR:.spec.podCIDR,PROVIDER:.spec.providerID'
+NAME              PODCIDR         PROVIDER
+tpudra-cp         10.244.0.0/24   gce://my-project/us-central1-a/tpudra-cp
+tpudra-cpu        10.244.2.0/24   gce://my-project/us-central1-a/tpudra-cpu
+tpudra-tpu        10.244.1.0/24   gce://my-project/us-central1-a/tpudra-tpu
+
+$ gcloud compute instances describe tpudra-tpu --zone us-central1-a \
+    --format="value(networkInterfaces[0].aliasIpRanges[0].ipCidrRange)"
+10.244.1.0/24
+```
+
+The driver logs what it found. On a `ct6e-standard-1t`, one chip on the vfio
+interface, with the topology derived from the chip count:
+
+```console
+$ kubectl logs -n dra-driver-google-tpu -l app.kubernetes.io/name=dra-driver-google-tpu -c tpu-dra-plugin
+Found 1 TPU chips in /dev/vfio
+Discovered TPU map[tpu.google.com/accelerator:tpu-v6e-slice] from driver configuration
+Assuming the single host topology 1x1 for 1 TPU chips
+```
+
+The node without a TPU runs the same DaemonSet and stays idle instead of failing,
+which is why the accelerator type can be set for the whole DaemonSet:
+
+```console
+No TPU detected on node "tpudra-cpu", retrying in 1m0s. Set --tpu-accelerator if this node does have a TPU.
+```
+
+Only the TPU node publishes a ResourceSlice, and its attributes are what a claim
+selects on:
+
+```console
+$ kubectl get resourceslice -o yaml
+    devices:
+    - name: "0"
+      attributes:
+        accelerator: {string: tpu-v6e-slice}
+        brand:       {string: Google}
+        chipCount:   {int: 1}
+        index:       {int: 0}
+        topology:    {string: 1x1}
+        tpuGen:      {string: v6e}
+        uuid:        {string: tpu-e637a4fe-432f-c428-0e12-9ddd178359cc}
+```
+*(Abridged; `chipCount` and `topology` come from the hardware, `accelerator` from
+the chart value.)*
+
+Then run a workload that claims a TPU:
+```bash
+kubectl apply -f demo/specs/tpu-test.yaml
+```
+
+The chip is injected into the container and the TPU environment is set from what
+was discovered:
+
+```console
+$ kubectl exec -n tpu-test tpu-pod0 -- ls -l /dev/vfio/
+crw-rw-rw-    1 root     root      239,   0 /dev/vfio/0
+crw-rw-rw-    1 root     root       10, 196 /dev/vfio/vfio
+
+$ kubectl exec -n tpu-test tpu-pod0 -- env | grep ^TPU_ | sort
+TPU_ACCELERATOR_TYPE=v6e-1
+TPU_CHIPS_PER_HOST_BOUNDS=1,1,1
+TPU_HOST_BOUNDS=1,1,1
+TPU_SKIP_MDS_QUERY=true
+TPU_TOPOLOGY=1x1
+TPU_WORKER_HOSTNAMES=localhost
+TPU_WORKER_ID=0
+```
+
+TPU VMs bill while they exist, so tear the cluster down when finished:
+```bash
+PROJECT=my-project ZONE=us-central1-a ./demo/clusters/gce/create-kubeadm-tpu-cluster.sh --delete
+```
+
+> [!NOTE]
+> Every resource is named after `NAME_PREFIX` (`tpu-dra` by default), so set it
+> to run more than one of these clusters in the same project. Installing a driver
+> image from a private registry needs an image pull secret: a plain Ubuntu node
+> has no credential helper for Artifact Registry.
+
+---
+
+## Running on any Kubernetes cluster
+
+The driver does not depend on a specific cloud provider or on provider specific
+node labels. It is deployed as a DaemonSet on every node, figures out whether the
+node has a TPU and stays idle when it has none.
+
+### TPU discovery
+
+The driver probes the host for TPU chips: generations up to v4 expose one
+`/dev/accel<n>` device per chip, later ones are bound to `vfio-pci` and expose
+one `/dev/vfio/<iommu group>` device per chip, which the driver tells apart from
+other VFIO devices by the Google PCI vendor id. The number of chips, the device
+directory and, for a single host TPU, the topology are therefore read from the
+hardware and never have to be labeled.
+
+The accelerator type cannot be observed locally. It is resolved from the first
+source that knows about it, in this order:
+
+1. The driver configuration (`kubeletPlugin.tpu.*` Helm values).
+2. The `tpu-env` file written by the Cloud TPU runtime on the host, `/etc/tpu/tpu-env` by default.
+3. The Google Cloud metadata server, when running on GCE or GKE.
+4. The labels already present on the `Node` object.
+
+On a platform where none of the automatic sources is available, configure the
+node explicitly. Only the accelerator type is required, a multi host slice also
+needs its topology:
+
+```bash
+helm upgrade -i ... \
+  --set kubeletPlugin.tpu.accelerator=tpu-v6e-slice
+```
+
+### Device attributes
+
+What the driver discovers is published on the devices of the ResourceSlice, not
+on the Node. Workloads select TPUs through the claim, so nothing has to label the
+node and the driver needs no write access to it:
+
+| Attribute | Example |
+| --- | --- |
+| `accelerator` | `tpu-v6e-slice` |
+| `tpuGen` | `v6e` |
+| `chipCount` | `8` |
+| `topology` | `2x4` |
+| `index` | `0` |
+| `uuid` | `tpu-25541d5c-...` |
+| `brand` | `Google` |
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: v6e-tpus
+spec:
+  spec:
+    devices:
+      requests:
+      - name: tpus
+        exactly:
+          deviceClassName: tpu.google.com
+          allocationMode: All
+          selectors:
+          - cel:
+              expression: device.attributes["tpu.google.com"].accelerator == "tpu-v6e-slice"
+```
+
+The GKE node labels (`cloud.google.com/gke-tpu-accelerator` and friends) are
+still read as an input when the platform sets them.
+
+### Google Cloud specific containers
+
+The `tpu-network-optimization` init container, the `sidecar-log-collector` and
+the `vbar-control-agent` sidecars use images that are only published for Google
+Cloud. Disable them on other platforms:
+
+```bash
+helm upgrade -i ... \
+  --set kubeletPlugin.containers.networkOptimizer.enabled=false \
+  --set kubeletPlugin.containers.logCollector.enabled=false \
+  --set kubeletPlugin.containers.vbarControlAgent.enabled=false
+```
+
+---
+
+## Tests
+
+Unit tests:
+```bash
+make test
+```
+
+End to end tests, which create a kind cluster with fake TPU devices and drive the
+scripts under `demo/`, see [tests/README.md](tests/README.md):
+```bash
+make test-e2e
+```
+
+---
+
 ## References
 
 For more information on the DRA Kubernetes feature and developing custom resource drivers, see the following resources:

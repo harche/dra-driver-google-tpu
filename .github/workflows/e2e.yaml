@@ -1,0 +1,49 @@
+name: E2E
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  K8S_VERSION: "v1.35.0"
+  KIND_VERSION: "v0.32.0"
+
+jobs:
+  bats:
+    name: Bats e2e tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      name: Checkout code
+
+    - name: Install kubectl and kind
+      run: |
+        TMP_DIR=$(mktemp -d)
+        curl -L "https://dl.k8s.io/${K8S_VERSION}/bin/linux/amd64/kubectl" -o "${TMP_DIR}/kubectl"
+        curl -Lo "${TMP_DIR}/kind" "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+        sudo install -m 0755 "${TMP_DIR}/kubectl" /usr/local/bin/kubectl
+        sudo install -m 0755 "${TMP_DIR}/kind" /usr/local/bin/kind
+        rm -rf "${TMP_DIR}"
+
+    - name: Setup Bats and bats libs
+      id: setup-bats
+      uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+      with:
+        support-path: ${{ github.workspace }}/tests/test_helper/bats-support
+        assert-path: ${{ github.workspace }}/tests/test_helper/bats-assert
+
+    - name: Run e2e tests
+      shell: bash
+      env:
+        BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
+        TERM: xterm
+      run: make test-e2e
+
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: kind-logs-${{ github.run_id }}
+        path: ./_artifacts
