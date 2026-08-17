@@ -45,6 +45,25 @@ device_attribute() {
     -o jsonpath="{.items[?(@.spec.nodeName=='$1')].spec.devices[0].attributes.$2.$3}"
 }
 
+# slice_uuids NODE lists the uuid attribute of every device on the node, sorted.
+slice_uuids() {
+  kubectl get resourceslice \
+    -o jsonpath="{.items[?(@.spec.nodeName=='$1')].spec.devices[*].attributes.uuid.string}" |
+    tr ' ' '\n' | sort | xargs
+}
+
+# distinct_uuids NODE counts the distinct device uuids on the node; the uuid is
+# derived per chip, so it equals the chip count.
+distinct_uuids() {
+  slice_uuids "$1" | tr ' ' '\n' | sort -u | grep -c .
+}
+
+# tpu_prefixed_uuids NODE counts the device uuids on the node that keep the
+# "tpu-" prefix of the published format.
+tpu_prefixed_uuids() {
+  slice_uuids "$1" | tr ' ' '\n' | grep -c '^tpu-'
+}
+
 # assert_eventually WANT COMMAND... retries until the command prints WANT, then
 # asserts one last time so that a failure reports both values.
 assert_eventually() {
@@ -121,6 +140,14 @@ dump_debug_info() {
   run device_attribute "$(tpu_node)" "accelerator" "string"
   assert_success
   assert_output "tpu-v4-podslice"
+}
+
+@test "every chip on the node gets its own uuid" {
+  # Each chip publishes its own uuid, so the node's four chips have four distinct
+  # values, each keeping the tpu- prefixed format.
+  assert_eventually "accel0 accel1 accel2 accel3" slice_devices "$(tpu_node)"
+  assert_eventually "4" distinct_uuids "$(tpu_node)"
+  assert_eventually "4" tpu_prefixed_uuids "$(tpu_node)"
 }
 
 @test "the driver does not write to the node" {
