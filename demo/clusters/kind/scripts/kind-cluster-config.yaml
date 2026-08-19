@@ -8,4 +8,7 @@ nodes:
     kind: JoinConfiguration
     nodeRegistration:
       kubeletExtraArgs:
+        # The accelerator type cannot be observed from the fake devices this demo
+        # sets up, so it is the only thing labeled here; the chip count and
+        # topology are auto-discovered from those devices by the driver.
         node-labels: "tpu.google.com/accelerator=tpu-v4-podslice"
