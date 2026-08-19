@@ -1,0 +1,74 @@
+# One pod, one container: claims a TPU and actually drives it with JAX instead
+# of only checking that the device is mounted. Confirms libtpu can initialize
+# the chip and run a real computation on it, and prints `tpu-info`'s view of
+# the same chip for an independent check.
+#
+# IPC_LOCK and SYS_RESOURCE are required: libtpu mmaps and locks a chunk of
+# memory for DMA, and the container runtime's default RLIMIT_MEMLOCK is too
+# small for it. Without them libtpu fails with:
+#   FAILED_PRECONDITION: TPU initialization failed: Couldn't mmap: Resource
+#   temporarily unavailable.
+#
+# pip installs jax, libtpu and tpu-info from the public internet at Pod start,
+# so this needs a node with egress (true of the demo clusters under demo/).
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tpu-jax-test
+
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: tpu-jax-test
+  name: all-tpus
+spec:
+  spec:
+    devices:
+      requests:
+      - name: tpus
+        exactly:
+          deviceClassName: tpu.google.com
+          allocationMode: All
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: tpu-jax-test
+  name: tpu-jax-pod
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: "google.com/tpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+  containers:
+  - name: jax
+    image: python:3.11-slim
+    securityContext:
+      capabilities:
+        add: ["IPC_LOCK", "SYS_RESOURCE"]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -ex
+        pip install -q -U "jax[tpu]" tpu-info
+        tpu-info
+        python3 -c "
+        import jax
+        import jax.numpy as jnp
+        print('jax devices:', jax.devices())
+        x = jnp.ones((1024, 1024))
+        print('matmul sum:', jnp.dot(x, x).sum())
+        print('backend:', jax.default_backend())
+        "
+    resources:
+      claims:
+      - name: tpu
+  resourceClaims:
+  - name: tpu
+    resourceClaimTemplateName: all-tpus
