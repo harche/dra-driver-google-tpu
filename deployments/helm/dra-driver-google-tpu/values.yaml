@@ -74,6 +74,11 @@ kubeletPlugin:
   # single host TPU, the topology are probed from the host. The accelerator type
   # is read from the host tpu-env file, the cloud metadata server or the node
   # labels. Set the properties the platform does not provide.
+  #
+  # These values are the same for every node the DaemonSet runs on, so they
+  # only work for a cluster where every node has the same TPU. On a
+  # heterogeneous cluster leave them empty and set the accelerator type per
+  # node instead, e.g. with the tpu-env file or a node label.
   tpu:
     accelerator: ""
     chipCount: ""
