@@ -715,9 +715,10 @@ func labelsFromNode(ctx context.Context, config *Config) (map[string]string, err
 // getTPUNodeLabels describes the TPU of the local node with the canonical
 // labels. Sources are tried in order of decreasing precedence so that an
 // explicit configuration always wins over auto discovery, and whatever is left
-// unknown is completed from the hardware itself. It returns errNoTPUDetected
-// when no source and no device knows about a TPU on this node.
-func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, error) {
+// unknown is completed from hardware, which the caller has already probed so
+// that the fail-fast check on a node without a TPU happens once, right at the
+// entry point of NewDriver (driver.go).
+func getTPUNodeLabels(ctx context.Context, config *Config, hardware *tpuHardware) (map[string]string, error) {
 	sources := []struct {
 		name string
 		get  func(context.Context) (map[string]string, error)
@@ -733,16 +734,6 @@ func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, e
 			return labelsFromNode(ctx, config)
 		}},
 	}
-
-	// The hardware is the ground truth for the presence of a TPU: the
-	// accelerator type may be configured cluster wide, for every node. Probing
-	// it first also keeps the other sources, one of which is a metadata server
-	// over the network, out of the retry loop of a node without a TPU.
-	hardware, err := probeTPUHardware(RootDirectory)
-	if err != nil {
-		return nil, err
-	}
-	klog.Infof("Found %d TPU chips in %s", hardware.chipCount, hardware.devDirectory)
 
 	labels := map[string]string{}
 	for _, source := range sources {

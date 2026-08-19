@@ -47,8 +47,17 @@ type driver struct {
 func NewDriver(ctx context.Context,
 	config *Config) (*driver, error) {
 
+	// Probed once, right at the entry point: a node without a TPU fails fast
+	// here with errNoTPUDetected, and the result is reused below instead of
+	// probing the host again to pick devDir.
+	hardware, err := probeTPUHardware(RootDirectory)
+	if err != nil {
+		return nil, err
+	}
+	klog.Infof("Found %d TPU chips in %s", hardware.chipCount, hardware.devDirectory)
+
 	// Fetch node labels.
-	nodeLabels, err := getTPUNodeLabels(ctx, config)
+	nodeLabels, err := getTPUNodeLabels(ctx, config, hardware)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TPU node labels: %w", err)
 	}
@@ -67,15 +76,7 @@ func NewDriver(ctx context.Context,
 		return nil, fmt.Errorf("error fetching accelerator generation: %w", err)
 	}
 
-	// Determine device directory based on TPU generation. The probed hardware
-	// wins over the generation, which does not know about future TPUs.
-	devDir := devDirectoryForGen(tpuGen)
-	if hardware, err := probeTPUHardware(RootDirectory); err == nil {
-		devDir = hardware.devDirectory
-	}
-	if devDir == "" {
-		return nil, fmt.Errorf("cannot determine the device directory of TPU generation %q", tpuGen)
-	}
+	devDir := hardware.devDirectory
 
 	triggerPublishChan := make(chan interface{}, 1)
 	state, err := NewDeviceState(config, nodeLabels, devDir, triggerPublishChan)
@@ -126,18 +127,6 @@ func NewDriver(ctx context.Context,
 
 	klog.Info("Published resourceslice")
 	return driver, nil
-}
-
-// devDirectoryForGen returns the directory holding the chip devices of a TPU
-// generation, or an empty string for generations released after this driver.
-func devDirectoryForGen(tpuGen string) string {
-	switch tpuGen {
-	case "v3", "v4", "v4lite":
-		return devDirectory
-	case "v5p", "v5lite", "v5litepod", "v6e":
-		return devDirectoryVfio
-	}
-	return ""
 }
 
 func (d *driver) GatherStateAndPublish(ctx context.Context) error {

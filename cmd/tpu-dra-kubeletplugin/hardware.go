@@ -64,8 +64,8 @@ type tpuHardware struct {
 	chipCount   int
 	// generation is the TPU generation read from the PCI ids of the vfio
 	// devices, in the vocabulary AcceleratorGen (see util.go) uses. Empty when
-	// the devices are not bound to vfio-pci (generations up to v4, see
-	// devDirectoryForGen in driver.go) or their generation is not one
+	// the devices are not bound to vfio-pci (generations up to v4 use
+	// /dev/accel instead) or their generation is not one
 	// tpuGenerationFromPCIIDs recognizes yet.
 	generation string
 }
