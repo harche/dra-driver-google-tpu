@@ -39,11 +39,12 @@ func writeFiles(t *testing.T, root string, files map[string]string) {
 
 func TestProbeTPUHardware(t *testing.T) {
 	tests := []struct {
-		name         string
-		files        map[string]string
-		wantDevDir   string
-		wantChips    int
-		wantNoTPUErr bool
+		name           string
+		files          map[string]string
+		wantDevDir     string
+		wantChips      int
+		wantGeneration string
+		wantNoTPUErr   bool
 	}{
 		{
 			name: "accel devices",
@@ -58,16 +59,38 @@ func TestProbeTPUHardware(t *testing.T) {
 			wantChips:  4,
 		},
 		{
-			name: "vfio devices of a google pci device",
+			name: "vfio devices of a recognized tpu generation",
 			files: map[string]string{
 				"dev/vfio/vfio": "",
 				"dev/vfio/12":   "",
 				"dev/vfio/13":   "",
 				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/vendor": googlePCIVendorID + "\n",
+				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/device": "0x006f\n", // v6e
 				"sys/kernel/iommu_groups/13/devices/0000:00:06.0/vendor": googlePCIVendorID + "\n",
+				"sys/kernel/iommu_groups/13/devices/0000:00:06.0/device": "0x006f\n", // v6e
+			},
+			wantDevDir:     devDirectoryVfio,
+			wantChips:      2,
+			wantGeneration: "v6e",
+		},
+		{
+			name: "vfio device of an unrecognized generation is still counted",
+			files: map[string]string{
+				"dev/vfio/12": "",
+				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/vendor": googlePCIVendorID + "\n",
+				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/device": "0x00ff\n", // not in tpuGenerationFromPCIIDs yet
 			},
 			wantDevDir: devDirectoryVfio,
-			wantChips:  2,
+			wantChips:  1,
+		},
+		{
+			name: "known non-tpu google device is ignored",
+			files: map[string]string{
+				"dev/vfio/12": "",
+				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/vendor": googlePCIVendorID + "\n",
+				"sys/kernel/iommu_groups/12/devices/0000:00:05.0/device": "0x0042\n", // gVNIC
+			},
+			wantNoTPUErr: true,
 		},
 		{
 			name: "vfio devices of another vendor are ignored",
@@ -104,6 +127,36 @@ func TestProbeTPUHardware(t *testing.T) {
 			}
 			if got.chipCount != tt.wantChips {
 				t.Errorf("probeTPUHardware() chipCount = %d, want %d", got.chipCount, tt.wantChips)
+			}
+			if got.generation != tt.wantGeneration {
+				t.Errorf("probeTPUHardware() generation = %q, want %q", got.generation, tt.wantGeneration)
+			}
+		})
+	}
+}
+
+func TestTpuGenerationFromPCIIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		device    string
+		subsystem string
+		want      string
+		wantOK    bool
+	}{
+		{name: "v3", device: "0x0027", subsystem: "0x004f", want: "v3", wantOK: true},
+		{name: "v2 is not supported by this driver", device: "0x0027", subsystem: "0x004e", wantOK: false},
+		{name: "v4", device: "0x005e", want: "v4", wantOK: true},
+		{name: "v5e", device: "0x0063", want: "v5lite", wantOK: true},
+		{name: "v5p", device: "0x0062", want: "v5p", wantOK: true},
+		{name: "v6e", device: "0x006f", want: "v6e", wantOK: true},
+		{name: "unrecognized device id", device: "0xffff", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tpuGenerationFromPCIIDs(tt.device, tt.subsystem)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("tpuGenerationFromPCIIDs(%q, %q) = (%q, %v), want (%q, %v)", tt.device, tt.subsystem, got, ok, tt.want, tt.wantOK)
 			}
 		})
 	}

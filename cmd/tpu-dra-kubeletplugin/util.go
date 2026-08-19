@@ -78,16 +78,6 @@ var (
 	acceleratorRegex     = regexp.MustCompile(`^tpu\d+[a-z]?$`)
 	pastAcceleratorRegex = regexp.MustCompile(`^tpu-v\d+([ep]?-slice)?((?:-lite)?-(device|podslice))?$`)
 
-	// The tpugen's value should follow the format of CloudTPU "TPU_ACCELERATOR_TYPE" : relative ascending order of release.
-	validTPUGenerations = map[string]int{
-		"v3":        0,
-		"v4":        1,
-		"v4lite":    2,
-		"v5lite":    3,
-		"v5litepod": 4,
-		"v5p":       5,
-		"v6e":       6,
-	}
 	// chips per node -> chips per dimension.
 	requestedChipCountToChipsPerDimNumaAligned = map[int][]int64{
 		1: {1, 1, 1},
@@ -294,6 +284,9 @@ func convertAcceleratorType(tpuGen string, topologyDims []int64) (string, error)
 // accelerator: tpu-v5p-slice; return: v5p
 // accelerator: tpu-v6e-slice; return: v6e
 // reference: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus#standard
+//
+// The generations it can return, and how to add a new one, are defined by
+// tpuGenerationFamilies in hardware.go.
 func AcceleratorGen(accelerator string) (string, error) {
 	if acceleratorRegex.MatchString(accelerator) {
 		return accelerator, nil
@@ -319,7 +312,7 @@ func AcceleratorGen(accelerator string) (string, error) {
 	if strings.HasPrefix(v, "v5") && strings.Contains(accelerator, "podslice") {
 		v = fmt.Sprintf("%spod", v)
 	}
-	if _, exists := validTPUGenerations[v]; !exists {
+	if !isValidTPUGeneration(v) {
 		return "", fmt.Errorf("invalid TPU generation: %s", v)
 	}
 	return v, nil
@@ -769,8 +762,12 @@ func getTPUNodeLabels(ctx context.Context, config *Config) (map[string]string, e
 
 	completeLabelsFromHardware(labels, hardware)
 	if labels[AcceleratorLabel] == "" {
-		return nil, fmt.Errorf("found %d TPU chips in %s but no source knows their type, set --tpu-accelerator or the %s node label",
-			hardware.chipCount, hardware.devDirectory, AcceleratorLabel)
+		hint := ""
+		if hardware.generation != "" {
+			hint = fmt.Sprintf(" of generation %s (read from their PCI id)", hardware.generation)
+		}
+		return nil, fmt.Errorf("found %d TPU chips%s in %s but no source knows their type, set --tpu-accelerator or the %s node label",
+			hardware.chipCount, hint, hardware.devDirectory, AcceleratorLabel)
 	}
 	return labels, nil
 }
@@ -785,6 +782,14 @@ func completeLabelsFromHardware(labels map[string]string, hardware *tpuHardware)
 	case chipCount:
 	default:
 		klog.Warningf("Node is labeled with %s TPU chips but %s holds %s devices", labels[AcceleratorCountLabel], hardware.devDirectory, chipCount)
+	}
+
+	// Cross-check against the generation read from the PCI id (see
+	// tpuGenerationFromPCIIDs in hardware.go), when the hardware could tell it.
+	if hardware.generation != "" && labels[AcceleratorLabel] != "" {
+		if gen, err := AcceleratorGen(labels[AcceleratorLabel]); err == nil && gen != hardware.generation {
+			klog.Warningf("Node is labeled with accelerator %q (generation %s) but its PCI id says generation %s", labels[AcceleratorLabel], gen, hardware.generation)
+		}
 	}
 
 	if labels[TopologyLabel] == "" {
