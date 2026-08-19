@@ -23,7 +23,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
@@ -36,7 +35,6 @@ const (
 )
 
 type driver struct {
-	client        coreclientset.Interface
 	pluginHelper  *kubeletplugin.Helper
 	deviceState   *DeviceState
 	healthchecker *TPUHealthChecker
@@ -49,15 +47,23 @@ type driver struct {
 func NewDriver(ctx context.Context,
 	config *Config) (*driver, error) {
 
-	err := ApplyNetworkSettings()
+	// Probed once, right at the entry point: a node without a TPU fails fast
+	// here with errNoTPUDetected, and the result is reused below instead of
+	// probing the host again to pick devDir.
+	hardware, err := probeTPUHardware(RootDirectory)
 	if err != nil {
-		klog.Errorf("error applying network settings: %v", err)
+		return nil, err
 	}
+	klog.Infof("Found %d TPU chips in %s", hardware.chipCount, hardware.devDirectory)
 
 	// Fetch node labels.
-	nodeLabels, err := getTPUNodeLabels(ctx, config)
+	nodeLabels, err := getTPUNodeLabels(ctx, config, hardware)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TPU node labels: %w", err)
+	}
+
+	if err := ApplyNetworkSettings(); err != nil {
+		klog.Errorf("error applying network settings: %v", err)
 	}
 
 	model := nodeLabels[AcceleratorLabel]
@@ -70,14 +76,7 @@ func NewDriver(ctx context.Context,
 		return nil, fmt.Errorf("error fetching accelerator generation: %w", err)
 	}
 
-	// Determine device directory based on TPU generation.
-	var devDir string
-	switch tpuGen {
-	case "v3", "v4", "v4lite":
-		devDir = devDirectory
-	case "v5p", "v5lite", "v5litepod", "v6e":
-		devDir = devDirectoryVfio
-	}
+	devDir := hardware.devDirectory
 
 	triggerPublishChan := make(chan interface{}, 1)
 	state, err := NewDeviceState(config, nodeLabels, devDir, triggerPublishChan)
@@ -93,7 +92,6 @@ func NewDriver(ctx context.Context,
 	}
 
 	driver := &driver{
-		client:        config.coreclient,
 		deviceState:   state,
 		config:        config,
 		healthchecker: hc,

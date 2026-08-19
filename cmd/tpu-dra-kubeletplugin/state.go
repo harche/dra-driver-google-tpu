@@ -60,7 +60,7 @@ func NewDeviceState(config *Config, nodeLabels map[string]string, devDir string,
 
 	tm, err := NewTPUManager(nodeLabels, devDir)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("error creating the TPU manager: %w", err)
 	}
 	allocatable, err := tm.enumerateAllPossibleTpuDevices()
 	if err != nil {

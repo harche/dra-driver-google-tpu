@@ -301,9 +301,9 @@ func TestGetNodeLabelsFromMetadata(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"cloud.google.com/gke-tpu-accelerator":   "tpu-v5-lite-device",
-		"cloud.google.com/gke-accelerator-count": "4",
-		"cloud.google.com/gke-tpu-topology":      "2x2",
+		"tpu.google.com/accelerator": "tpu-v5-lite-device",
+		"tpu.google.com/chip-count":  "4",
+		"tpu.google.com/topology":    "2x2",
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -344,13 +344,59 @@ TOPOLOGY: '2x4'
 	}
 
 	want := map[string]string{
-		"cloud.google.com/gke-tpu-accelerator":    "tpu-v5-lite-podslice",
-		"cloud.google.com/gke-accelerator-count":  "8",
-		"cloud.google.com/gke-tpu-topology":       "2x4",
-		"cloud.google.com/gke-tpu-ici-resiliency": "false",
+		"tpu.google.com/accelerator":    "tpu-v5-lite-podslice",
+		"tpu.google.com/chip-count":     "8",
+		"tpu.google.com/topology":       "2x4",
+		"tpu.google.com/ici-resiliency": "false",
 	}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("getNodeLabelsFromMetadata() got = %v, want %v", got, want)
+	}
+}
+
+func TestNormalizeTPULabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   map[string]string
+	}{
+		{
+			name: "gke labels",
+			labels: map[string]string{
+				"cloud.google.com/gke-tpu-accelerator":   "tpu-v6e-slice",
+				"cloud.google.com/gke-accelerator-count": "8",
+				"cloud.google.com/gke-tpu-topology":      "2x4",
+				"kubernetes.io/os":                       "linux",
+			},
+			want: map[string]string{
+				"tpu.google.com/accelerator": "tpu-v6e-slice",
+				"tpu.google.com/chip-count":  "8",
+				"tpu.google.com/topology":    "2x4",
+			},
+		},
+		{
+			name: "canonical labels take precedence",
+			labels: map[string]string{
+				"tpu.google.com/accelerator":           "tpu-v6e-slice",
+				"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
+			},
+			want: map[string]string{
+				"tpu.google.com/accelerator": "tpu-v6e-slice",
+			},
+		},
+		{
+			name:   "no tpu labels",
+			labels: map[string]string{"kubernetes.io/os": "linux"},
+			want:   map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeTPULabels(tt.labels); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("normalizeTPULabels() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

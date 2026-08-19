@@ -51,6 +51,10 @@ type AllocatableDevice struct {
 	brand         string
 	driverVersion string
 	allocatable   bool
+	// Properties of the TPU the chip belongs to, what a claim selects on.
+	accelerator string
+	chipCount   int
+	topology    string
 }
 
 // tpuManager manages google tpu devices.
@@ -80,7 +84,7 @@ func NewTPUManager(nodeLabels map[string]string, devDirectory string) (*tpuManag
 	klog.Infof("Accelerator count from node labels: %s", acceleratorCount)
 	chipCount, err := ChipCount(acceleratorCount)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot determine the number of TPU chips of the node, set --tpu-chip-count or the %s label: %w", AcceleratorCountLabel, err)
 	}
 
 	// Initialize environment variables that will be set in containers requesting TPU resources.
@@ -128,7 +132,22 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 			"tpuGen": {
 				StringValue: ptr.To(d.tpuGen),
 			},
+			"brand": {
+				StringValue: ptr.To(d.brand),
+			},
+			"accelerator": {
+				StringValue: ptr.To(d.accelerator),
+			},
+			"chipCount": {
+				IntValue: ptr.To(int64(d.chipCount)),
+			},
 		},
+	}
+	// A node of a multi host slice cannot always tell its topology.
+	if d.topology != "" {
+		device.Attributes["topology"] = resourceapi.DeviceAttribute{
+			StringValue: ptr.To(d.topology),
+		}
 	}
 	return device
 }
@@ -145,6 +164,9 @@ func (tm *tpuManager) getTpuInfo(i int, f fs.DirEntry) *AllocatableDevice {
 		brand:         "Google",
 		driverVersion: "1.0.0",
 		allocatable:   true,
+		accelerator:   tm.nodeLabels[AcceleratorLabel],
+		chipCount:     tm.tpuChipCount,
+		topology:      tm.nodeLabels[TopologyLabel],
 	}
 	return allocatableDevice
 }
@@ -152,14 +174,12 @@ func (tm *tpuManager) getTpuInfo(i int, f fs.DirEntry) *AllocatableDevice {
 // Discovers all TPU devices available on the local node by walking tpuManager's devDirectory.
 func (tm *tpuManager) enumerateAllPossibleTpuDevices() (AllocatableDevices, error) {
 	klog.Info("Enumerating all possible Tpu Devices")
-	var tpuDeviceRegex string
-	switch tm.tpuGen {
-	case "v3", "v4", "v4lite":
-		tpuDeviceRegex = tpuV4DeviceRegex
-	case "v5p", "v5lite", "v5litepod", "v6e":
-		tpuDeviceRegex = tpuDeviceNumericalRegex
+	// The device naming depends on the kernel interface the chips are bound to,
+	// not on the TPU generation, which may be unknown to this driver.
+	reg := regexp.MustCompile(tpuV4DeviceRegex)
+	if tm.DevDirectory == devDirectoryVfio {
+		reg = regexp.MustCompile(tpuDeviceNumericalRegex)
 	}
-	reg := regexp.MustCompile(tpuDeviceRegex)
 	files, err := os.ReadDir(tm.DevDirectory)
 	if err != nil {
 		return nil, err
@@ -180,7 +200,7 @@ func (tm *tpuManager) enumerateAllPossibleTpuDevices() (AllocatableDevices, erro
 	}
 	// how to handle this gracefully?
 	if num_devices != tm.tpuChipCount {
-		return nil, fmt.Errorf("enumerated tpu devices not equal to chipCount")
+		return nil, fmt.Errorf("found %d TPU devices in %s, the node is expected to have %d chips", num_devices, tm.DevDirectory, tm.tpuChipCount)
 	}
 	klog.Info("Number of devices discovered", num_devices)
 	tm.devices = allocatableDevices

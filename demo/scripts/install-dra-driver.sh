@@ -31,4 +31,5 @@ ${HELM} upgrade -i --create-namespace --namespace dra-driver-google-tpu dra-driv
   --set kubeletPlugin.priorityClassName="" \
   --set kubeletPlugin.tolerations[0].key=google.com/tpu \
   --set kubeletPlugin.tolerations[0].operator=Exists \
-  --set kubeletPlugin.tolerations[0].effect=NoSchedule
+  --set kubeletPlugin.tolerations[0].effect=NoSchedule \
+  "$@"

@@ -33,3 +33,7 @@ gemini-*.*
 
 # Helm distribution directory
 /dist/
+
+# e2e test logs and the bats helper libraries
+/_artifacts/
+/tests/test_helper/
