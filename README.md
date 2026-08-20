@@ -120,12 +120,7 @@ kubectl get pods -n tpu-test
 
 Then verify that the TPU devices were correctly injected into the pod:
 ```bash
-for pod in $(kubectl get pod --output=jsonpath='{.items[*].metadata.name}' -n tpu-test); do \
-    for ctr in $(kubectl get pod ${pod} -o jsonpath='{.spec.containers[*].name}' -n tpu-test); do \
-      echo "${pod} ${ctr}:"
-      kubectl exec ${pod} -c ${ctr} -n tpu-test -- ls -l /dev/ | grep -E "accel|tpu" || echo "No TPU devices found"
-    done
-done
+./demo/scripts/verify-tpu-devices.sh tpu-test
 ```
 
 ---
@@ -182,12 +177,7 @@ kubectl get pods -n tpu-test
 
 Then verify that the TPU devices were correctly injected into the pod:
 ```bash
-for pod in $(kubectl get pod --output=jsonpath='{.items[*].metadata.name}' -n tpu-test); do \
-    for ctr in $(kubectl get pod ${pod} -o jsonpath='{.spec.containers[*].name}' -n tpu-test); do \
-      echo "${pod} ${ctr}:"
-      kubectl exec ${pod} -c ${ctr} -n tpu-test -- ls -l /dev/ | grep -E "accel|tpu" || echo "No TPU devices found"
-    done
-done
+./demo/scripts/verify-tpu-devices.sh tpu-test
 ```
 
 #### 5. Send a Test Request
