@@ -486,7 +486,9 @@ func cubeOrLarger(topologyDims []int64) bool {
 
 // ApplyNetworkSettings iterates through a predefined list of network settings
 // and applies them by writing to the corresponding system file. After writing,
-// it reads back the value to verify the update and logs the results.
+// it reads back the value and logs it for visibility. The read-back is
+// best-effort: the kernel may clamp or normalize a sysctl-style value while
+// still accepting the write, so a mismatch is logged but not treated as an error.
 // It traverses the entire list before returning, even if an error is encountered.
 func ApplyNetworkSettings() error {
 	return applyNetworkSettings(RootDirectory)
@@ -503,13 +505,22 @@ func applyNetworkSettings(parentDir string) error {
 			errs = append(errs, filePath)
 			continue
 		}
+		// The read-back is best-effort and only serves to warn, so a read
+		// failure does not fail the operation once the write has succeeded.
 		value, err := os.ReadFile(filePath)
 		if err != nil {
-			klog.Errorf("Error reading from %s: %v", filePath, err)
-			errs = append(errs, filePath)
+			klog.Warningf("Error reading back %s: %v", filePath, err)
 			continue
 		}
-		klog.Infof("Current value of %s: %s", filePath, value)
+		// Best-effort read-back: the kernel can clamp or normalize a sysctl-style
+		// value while still accepting the write, so a mismatch is logged for
+		// visibility but not treated as an error. Reads from /proc/sys carry a
+		// trailing newline, hence the trim.
+		got := strings.TrimSpace(string(value))
+		if got != setting.Value {
+			klog.Warningf("Value mismatch for %s: wrote %q, read back %q", filePath, setting.Value, got)
+		}
+		klog.Infof("Current value of %s: %s", filePath, got)
 	}
 	if len(errs) == 0 {
 		return nil
