@@ -8,6 +8,9 @@ bin/*
 /tpu-dra-kubeletplugin
 Dockerfile.cross
 
+# OS artifacts
+.DS_Store
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -27,9 +30,11 @@ go.work
 *.swo
 *~
 
-# Gemini CLI related files.
-gemini-*.*
-/gemini-*/
+# AI IDEs and CLIs
+.claude/
+.codex/
+.cursor/
+.gemini/
 
 # Helm distribution directory
 /dist/
